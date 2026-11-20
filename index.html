@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LA Shake Watch — earthquakes near Los Angeles this week</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    :root { --ink:#0f172a; --muted:#64748b; --accent:#b91c1c; --recent:#dc2626; --older:#f59e0b; --bg:#f8fafc; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: "Helvetica Neue", Arial, sans-serif; color: var(--ink); background: var(--bg); }
+    header { padding: 14px 16px 10px; max-width: 1100px; margin: 0 auto; }
+    .host { font-size: 12px; color: #fff; background: #1e293b; padding: 6px 16px; }
+    .host b { color: #fbbf24; }
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    p { margin: 0 0 6px; line-height: 1.45; font-size: 14px; }
+    #status { font-weight: 600; color: var(--accent); }
+    .controls { display: flex; gap: 8px; margin: 6px 0 4px; flex-wrap: wrap; }
+    .controls button { border: 1px solid #cbd5e1; background: #fff; padding: 6px 12px; border-radius: 999px; font-size: 13px; cursor: pointer; }
+    .controls button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+    #map { height: 68vh; max-width: 1100px; margin: 0 auto; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; }
+    footer { max-width: 1100px; margin: 0 auto; padding: 8px 16px 16px; font-size: 12px; color: var(--muted); }
+    .legend { background: #fff; padding: 8px 10px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.2); font-size: 12px; line-height: 1.6; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+    .popup h3 { margin: 0 0 4px; font-size: 15px; }
+    .popup p { margin: 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="host" id="host">Checking where this page is served from…</div>
+  <header>
+    <h1>LA Shake Watch</h1>
+    <p>Every earthquake recorded in Southern California in the past 7 days, live from the
+      <a href="https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php" target="_blank" rel="noopener">USGS earthquake feed</a>.
+      Bigger circles are stronger quakes; red ones happened in the last 24 hours. Tap a circle for its magnitude, time and depth.</p>
+    <p id="status">Loading this week's earthquakes…</p>
+    <div class="controls">
+      <button id="all" class="on" type="button">All quakes</button>
+      <button id="felt" type="button">M2.5+ (people may feel it)</button>
+    </div>
+  </header>
+
+  <div id="map" role="region" aria-label="Map of recent earthquakes in Southern California"></div>
+
+  <footer>
+    Data: U.S. Geological Survey, refreshed every minute. Basemap © OpenStreetMap contributors. Map library: Leaflet.
+    Distances are straight-line from USC. SSCI 591 Project 5 · Yuqi (Jeff) Ge.
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    // Where the page is running: a file on a laptop, or a real host in the cloud.
+    const host = document.getElementById("host");
+    host.innerHTML = location.protocol === "file:"
+      ? "This page is open as a file on your own computer. It is not on a server yet."
+      : `This page is served by <b>${location.hostname.endsWith("amplifyapp.com") ? "AWS Amplify Hosting" : "a web host"}</b> · ${location.hostname} · ${location.protocol.replace(":", "")}`;
+
+    const USC = [34.0224, -118.2851];
+    // Southern California box (Santa Barbara to the Mexican border, coast to the Mojave).
+    const BOX = { south: 32.4, north: 35.8, west: -121.0, east: -114.0 };
+    const FEED = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_week.geojson";
+
+    const map = L.map("map").setView([34.0, -117.6], 8);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    L.circleMarker(USC, { radius: 7, color: "#1e293b", weight: 2, fillColor: "#fbbf24", fillOpacity: 1 })
+      .addTo(map).bindTooltip("USC", { permanent: true, direction: "top", offset: [0, -6] });
+
+    const legend = L.control({ position: "bottomright" });
+    legend.onAdd = () => {
+      const div = L.DomUtil.create("div", "legend");
+      div.innerHTML =
+        '<b>Earthquakes</b><br>' +
+        '<span class="dot" style="background:var(--recent)"></span>Last 24 hours<br>' +
+        '<span class="dot" style="background:var(--older)"></span>Earlier this week<br>' +
+        '<span class="dot" style="background:#fbbf24;border:2px solid #1e293b"></span>USC<br>' +
+        '<span style="color:#64748b">Circle size = magnitude</span>';
+      return div;
+    };
+    legend.addTo(map);
+
+    const layer = L.layerGroup().addTo(map);
+    let quakes = [];
+
+    function inBox(lon, lat) {
+      return lat >= BOX.south && lat <= BOX.north && lon >= BOX.west && lon <= BOX.east;
+    }
+
+    // Escape text from the feed before putting it in a popup.
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function draw(minMag) {
+      layer.clearLayers();
+      const shown = quakes.filter(q => q.mag >= minMag);
+      const dayAgo = Date.now() - 24 * 3600 * 1000;
+      shown
+        .sort((a, b) => a.mag - b.mag) // small circles drawn first, big ones on top
+        .forEach(q => {
+          const recent = q.time >= dayAgo;
+          const miles = map.distance(USC, [q.lat, q.lon]) / 1609.34;
+          L.circleMarker([q.lat, q.lon], {
+            radius: Math.max(3, q.mag * 4),
+            color: "#fff", weight: 1,
+            fillColor: recent ? "#dc2626" : "#f59e0b", fillOpacity: 0.8
+          }).bindPopup(
+            `<div class="popup"><h3>M ${q.mag.toFixed(1)} · ${esc(q.place)}</h3>
+             <p>${new Date(q.time).toLocaleString()} (your time)</p>
+             <p>Depth: ${q.depth.toFixed(1)} km · ${miles.toFixed(0)} miles from USC</p>
+             <p><a href="${esc(q.url)}" target="_blank" rel="noopener">USGS details</a></p></div>`
+          ).addTo(layer);
+        });
+
+      if (!shown.length) {
+        status.textContent = "No earthquakes of that size in Southern California this week.";
+        return;
+      }
+      const nearest = shown.reduce((best, q) => {
+        const d = map.distance(USC, [q.lat, q.lon]);
+        return d < best.d ? { q, d } : best;
+      }, { q: null, d: Infinity });
+      const biggest = shown.reduce((a, b) => (b.mag > a.mag ? b : a));
+      status.textContent =
+        `${shown.length} earthquakes this week · biggest M ${biggest.mag.toFixed(1)} near ${biggest.place} · ` +
+        `closest to USC: ${(nearest.d / 1609.34).toFixed(1)} miles away (M ${nearest.q.mag.toFixed(1)})`;
+    }
+
+    const status = document.getElementById("status");
+    fetch(FEED)
+      .then(r => { if (!r.ok) throw new Error("USGS feed returned " + r.status); return r.json(); })
+      .then(data => {
+        quakes = data.features
+          .filter(f => f.geometry && f.properties.mag !== null && inBox(f.geometry.coordinates[0], f.geometry.coordinates[1]))
+          .map(f => ({
+            lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1], depth: f.geometry.coordinates[2] ?? 0,
+            mag: f.properties.mag, place: f.properties.place || "Southern California",
+            time: f.properties.time, url: f.properties.url
+          }));
+        draw(-Infinity);
+      })
+      .catch(err => {
+        status.textContent = "Could not load the USGS feed right now. Please refresh in a minute.";
+        console.error(err);
+      });
+
+    const btnAll = document.getElementById("all"), btnFelt = document.getElementById("felt");
+    btnAll.onclick = () => { btnAll.classList.add("on"); btnFelt.classList.remove("on"); draw(-Infinity); };
+    btnFelt.onclick = () => { btnFelt.classList.add("on"); btnAll.classList.remove("on"); draw(2.5); };
+  </script>
+</body>
+</html>
